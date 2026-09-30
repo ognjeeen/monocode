@@ -7,10 +7,54 @@ import {
   type Session,
 } from "../model/session";
 import {
+  backfillClaudeShellCommands,
   isPersistableId,
   persistFingerprint,
   sanitizeSessionForPersist,
+  shouldPersistSession,
 } from "./sessionStore";
+
+it("keeps host-owned transcripts out of local session storage", () => {
+  const session = newSession("codex", "remote://env/home/me/repo");
+  session.blocks = [{ id: "turn", role: "user", text: "Continue" }];
+  expect(shouldPersistSession(session)).toBe(false);
+});
+
+describe("Claude Shell row recovery", () => {
+  it("restores only matching placeholder rows and preserves tool output", () => {
+    const blocks: Block[] = [
+      {
+        id: "shell",
+        role: "tool",
+        text: "Shell",
+        tool: {
+          callId: "toolu_shell",
+          title: "Shell",
+          kind: "execute",
+          status: "completed",
+          detail: "tests passed",
+        },
+      },
+      {
+        id: "read",
+        role: "tool",
+        text: "Read file.ts",
+        tool: { callId: "toolu_read", kind: "read" },
+      },
+    ];
+    const command = `npm run check:web ${"--filter tests ".repeat(20)}`.trim();
+    const repaired = backfillClaudeShellCommands(blocks, {
+      toolu_shell: command,
+      toolu_read: "ignore me",
+    });
+    expect(repaired[0]).toMatchObject({
+      text: command,
+      tool: { title: command, status: "completed", detail: "tests passed" },
+    });
+    expect(repaired[1]).toBe(blocks[1]);
+    expect(backfillClaudeShellCommands(repaired, {})).toBe(repaired);
+  });
+});
 
 describe("isPersistableId", () => {
   it("accepts alphanumeric ids with hyphens and underscores", () => {
@@ -147,6 +191,60 @@ describe("sanitizeSessionForPersist", () => {
       { id: "sent", role: "user", text: "Start here" },
       { id: "reply", role: "assistant", text: "Done" },
       { id: "draft", role: "user", text: "Explore this", draft: true },
+    ]);
+  });
+
+  it("persists generated image metadata without binary payloads", () => {
+    const session = newSession("codex", "/repo");
+    session.blocks = [
+      { id: "u", role: "user", text: "Draw this" },
+      {
+        id: "image",
+        role: "image",
+        text: "",
+        image: {
+          path: "/app-data/generated-images/image.png",
+          name: "generated-image",
+          mimeType: "image/png",
+          size: 8,
+          alt: "A clean product photo",
+        },
+      },
+    ];
+
+    expect(sanitizeSessionForPersist(session).blocks[1]).toEqual({
+      id: "image",
+      role: "image",
+      text: "",
+      image: {
+        path: "/app-data/generated-images/image.png",
+        name: "generated-image",
+        mimeType: "image/png",
+        size: 8,
+        alt: "A clean product photo",
+      },
+    });
+  });
+
+  it("drops malformed generated image metadata", () => {
+    const session = newSession("codex", "/repo");
+    session.blocks = [
+      { id: "u", role: "user", text: "Draw this" },
+      {
+        id: "image",
+        role: "image",
+        text: "",
+        image: {
+          path: "",
+          name: "generated-image",
+          mimeType: "image/png",
+          size: 0,
+        },
+      },
+    ];
+
+    expect(sanitizeSessionForPersist(session).blocks).toEqual([
+      { id: "u", role: "user", text: "Draw this" },
     ]);
   });
 
